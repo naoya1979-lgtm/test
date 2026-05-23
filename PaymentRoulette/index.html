@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>男気決済ルーレット</title>
+    <!-- Tailwind CSS (CDN経由・軽量化のため今回はCDNを利用) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* ルーレットの回転アニメーション用クラス */
+        .spinning {
+            transition: transform 5s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        
+        /* 針（ポインター）のスタイル */
+        .pointer {
+            position: absolute;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0; 
+            height: 0; 
+            border-left: 20px solid transparent;
+            border-right: 20px solid transparent;
+            border-top: 40px solid #ef4444; /* Tailwind red-500 */
+            z-index: 10;
+            filter: drop-shadow(0 4px 3px rgba(0,0,0,0.5));
+        }
+
+        /* アプリ全体のちらつき防止 */
+        body {
+            -webkit-tap-highlight-color: transparent;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans h-screen w-screen overflow-hidden flex flex-col">
+
+    <!-- ==========================================
+         1. セットアップ画面 (人数選択)
+    =========================================== -->
+    <div id="setup-screen" class="flex-1 flex flex-col items-center justify-center p-6 w-full max-w-md mx-auto">
+        <h1 class="text-3xl font-bold mb-2 text-yellow-400 tracking-wider">男気決済<br>ルーレット</h1>
+        <p class="text-gray-400 mb-8 text-sm">今日のお支払いは誰の手に？</p>
+
+        <div class="w-full bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 class="text-lg mb-4 text-center">参加人数を選択</h2>
+            
+            <!-- 人数選択グリッド -->
+            <div id="number-grid" class="grid grid-cols-4 gap-3 mb-6">
+                <!-- JSで動的にボタンを生成します -->
+            </div>
+
+            <!-- スタートボタン (初期非活性) -->
+            <button id="btn-start" disabled
+                class="w-full py-4 rounded-lg font-bold text-xl transition-all duration-200 
+                       disabled:bg-gray-600 disabled:text-gray-400 disabled:opacity-50
+                       bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white shadow-[0_0_15px_rgba(220,38,38,0.5)] disabled:shadow-none">
+                人数を選んでください
+            </button>
+        </div>
+    </div>
+
+
+    <!-- ==========================================
+         2. ルーレット画面
+    =========================================== -->
+    <div id="roulette-screen" class="hidden flex-1 flex flex-col items-center justify-center p-4 w-full max-w-md mx-auto relative">
+        <h2 class="text-2xl font-bold mb-8 text-yellow-400 drop-shadow-md">運命のルーレット</h2>
+        
+        <div class="relative">
+            <!-- 針 (Pointer) -->
+            <div class="pointer"></div>
+            
+            <!-- ルーレット盤面 (Canvas) -->
+            <!-- スマホ画面に収まるようサイズ調整 -->
+            <canvas id="roulette-canvas" width="300" height="300" 
+                    class="rounded-full shadow-[0_0_20px_rgba(250,204,21,0.3)] border-4 border-yellow-500 bg-gray-800">
+            </canvas>
+        </div>
+
+        <p id="spin-message" class="mt-8 text-lg animate-pulse text-gray-300">
+            回しています...
+        </p>
+    </div>
+
+
+    <!-- ==========================================
+         3. 結果画面
+    =========================================== -->
+    <div id="result-screen" class="hidden flex-1 flex flex-col items-center justify-center p-6 w-full max-w-md mx-auto text-center">
+        <div class="bg-gray-800 p-8 rounded-2xl border-2 border-yellow-500 shadow-[0_0_30px_rgba(250,204,21,0.4)] w-full">
+            <p class="text-gray-300 mb-2">本日の男気決済は...</p>
+            <h2 class="text-5xl font-black text-white mb-2" id="winner-display">
+                <span class="text-yellow-400">1</span> 番
+            </h2>
+            <p class="text-xl font-bold text-red-400 mb-8">おごり決定！！</p>
+            
+            <p class="text-sm text-gray-400 mb-6">ごちそうさまでした！</p>
+
+            <button id="btn-retry" 
+                class="w-full py-4 bg-gray-700 hover:bg-gray-600 rounded-lg font-bold text-white transition-colors">
+                もう一度最初から
+            </button>
+        </div>
+    </div>
+
+
+    <!-- ==========================================
+         アプリケーションロジック (JavaScript)
+    =========================================== -->
+    <script>
+        // --- 設定・状態管理 ---
+        const MAX_PLAYERS = 8; // 最大選択人数
+        const MIN_PLAYERS = 2; // 最小選択人数
+        let selectedPlayers = 0; // 現在選択されている人数
+        let currentRotation = 0; // ルーレットの現在の累積回転角度
+
+        // 視認性の高いカラーパレット (8色)
+        const COLORS = ["#EF4444", "#3B82F6", "#10B981", "#F59E0B", "#8B5CF6", "#EC4899", "#14B8A6", "#F97316"];
+
+        // --- DOM要素の取得 ---
+        const screens = {
+            setup: document.getElementById('setup-screen'),
+            roulette: document.getElementById('roulette-screen'),
+            result: document.getElementById('result-screen')
+        };
+        const numberGrid = document.getElementById('number-grid');
+        const btnStart = document.getElementById('btn-start');
+        const btnRetry = document.getElementById('btn-retry');
+        const canvas = document.getElementById('roulette-canvas');
+        const ctx = canvas.getContext('2d');
+        const winnerDisplay = document.getElementById('winner-display');
+
+        // --- 初期化処理 ---
+        function init() {
+            createNumberButtons();
+            
+            // イベントリスナー登録
+            btnStart.addEventListener('click', startSequence);
+            btnRetry.addEventListener('click', resetApp);
+        }
+
+        // 人数選択ボタンの生成
+        function createNumberButtons() {
+            for (let i = MIN_PLAYERS; i <= MAX_PLAYERS; i++) {
+                const btn = document.createElement('button');
+                btn.textContent = i;
+                btn.className = `
+                    py-3 rounded-md font-bold text-xl border-2 border-gray-600 
+                    transition-all text-gray-300 hover:border-gray-400
+                `;
+                btn.addEventListener('click', () => selectNumber(i, btn));
+                numberGrid.appendChild(btn);
+            }
+        }
+
+        // 人数選択時の処理
+        function selectNumber(num, clickedBtn) {
+            selectedPlayers = num;
+            
+            // UIのアクティブ状態の更新
+            Array.from(numberGrid.children).forEach(btn => {
+                btn.classList.remove('bg-yellow-500', 'border-yellow-500', 'text-gray-900');
+                btn.classList.add('border-gray-600', 'text-gray-300');
+            });
+            clickedBtn.classList.remove('border-gray-600', 'text-gray-300');
+            clickedBtn.classList.add('bg-yellow-500', 'border-yellow-500', 'text-gray-900');
+
+            // スタートボタンの活性化
+            btnStart.disabled = false;
+            btnStart.textContent = `${num}人でスタート！`;
+        }
+
+        // 画面遷移ユーティリティ
+        function showScreen(screenName) {
+            Object.values(screens).forEach(s => s.classList.add('hidden'));
+            screens[screenName].classList.remove('hidden');
+        }
+
+        // --- 描画ロジック (Canvas) ---
+        // 選択された人数に応じてルーレット盤を描画する
+        function drawRoulette(numPlayers) {
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            const radius = centerX;
+            const sliceAngle = (2 * Math.PI) / numPlayers;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (let i = 0; i < numPlayers; i++) {
+                const startAngle = i * sliceAngle;
+                const endAngle = startAngle + sliceAngle;
+
+                // 扇形の描画
+                ctx.beginPath();
+                ctx.moveTo(centerX, centerY);
+                ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+                ctx.closePath();
+                
+                ctx.fillStyle = COLORS[i % COLORS.length];
+                ctx.fill();
+                ctx.strokeStyle = '#1F2937'; // 境界線 (gray-800)
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // テキスト(番号)の描画
+                ctx.save();
+                ctx.translate(centerX, centerY);
+                // テキストを扇形の中央に配置するための回転
+                ctx.rotate(startAngle + sliceAngle / 2);
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 24px sans-serif';
+                // 半径の少し内側に配置
+                ctx.fillText((i + 1).toString(), radius - 30, 0);
+                ctx.restore();
+            }
+        }
+
+        // --- 抽選・アニメーションロジック ---
+        function startSequence() {
+            showScreen('roulette');
+            
+            // アニメーションをリセット
+            canvas.style.transition = 'none';
+            canvas.style.transform = `rotate(0deg)`;
+            currentRotation = 0;
+
+            // 盤面の描画
+            drawRoulette(selectedPlayers);
+
+            // 画面遷移後、少し間を置いて自動的に回し始める
+            setTimeout(spinRoulette, 800);
+        }
+
+        function spinRoulette() {
+            // 基本回転数 (例: 最低5周 = 360 * 5 = 1800度)
+            const baseRotations = 360 * 5;
+            // 追加のランダム回転 (0〜359度) => ここで純粋な乱数(Math.random)を利用し公平性を担保
+            const randomExtraAngle = Math.floor(Math.random() * 360); 
+            const spinAngle = baseRotations + randomExtraAngle;
+            
+            currentRotation += spinAngle;
+
+            // CSSアニメーションの適用
+            canvas.style.transition = 'transform 5s cubic-bezier(0.2, 0.8, 0.2, 1)';
+            canvas.style.transform = `rotate(${currentRotation}deg)`;
+
+            // アニメーション終了の検知 (transitionend)
+            // ※スマホブラウザ等の相性で発火しないリスク(フェイルセーフ)としてsetTimeoutも併用
+            let isFinished = false;
+            
+            const finishSpin = () => {
+                if (isFinished) return;
+                isFinished = true;
+                canvas.removeEventListener('transitionend', finishSpin);
+                calculateResult(randomExtraAngle);
+            };
+
+            canvas.addEventListener('transitionend', finishSpin);
+            // フォールバック: 5秒(5000ms) + 余裕(200ms) = 5200ms後に強制発火
+            setTimeout(finishSpin, 5200); 
+        }
+
+        // 最終的な角度から当選者を計算
+        function calculateResult(extraAngle) {
+            // Canvasの0度は右(3時方向)。針は上(12時方向、270度 = -90度)。
+            // ルーレットを時計回りに回した時、上部に来る角度を逆算する。
+            
+            const sliceAngle = 360 / selectedPlayers;
+            
+            // 針の位置(真上=270度)から、回した角度分を引くことで、
+            // 当初0度の位置にあった基準線から見て、現在針がどこにあるかを計算。
+            // (剰余演算を利用し 0 <= angle < 360 に正規化)
+            const normalizedAngle = (270 - (currentRotation % 360) + 360) % 360;
+
+            // 属するセグメントのインデックスを計算 (0始まり)
+            const winnerIndex = Math.floor(normalizedAngle / sliceAngle);
+            const winnerNumber = winnerIndex + 1;
+
+            // 結果画面の更新と遷移
+            winnerDisplay.innerHTML = `<span class="text-yellow-400">${winnerNumber}</span> 番`;
+            
+            // 少しだけ余韻を残して結果画面へ
+            setTimeout(() => {
+                showScreen('result');
+            }, 500);
+        }
+
+        function resetApp() {
+            selectedPlayers = 0;
+            btnStart.disabled = true;
+            btnStart.textContent = "人数を選んでください";
+            
+            // 選択状態のクリア
+            Array.from(numberGrid.children).forEach(btn => {
+                btn.classList.remove('bg-yellow-500', 'border-yellow-500', 'text-gray-900');
+                btn.classList.add('border-gray-600', 'text-gray-300');
+            });
+
+            showScreen('setup');
+        }
+
+        // --- アプリ起動 ---
+        init();
+
+    </script>
+</body>
+</html>
