@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>リズムアクション プロトタイプ v6</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a202c; color: white; user-select: none; touch-action: none; }
+        canvas { display: block; width: 100%; height: 100%; object-fit: contain; background-color: #2d3748; transition: background-color 0.5s; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .hidden { display: none !important; }
+        #tapArea:active { transform: scale(0.98); background-color: #4a5568; }
+        /* フェーズ進行による背景色の変化 */
+        .bg-phase-1 { background-color: #2d3748 !important; }
+        .bg-phase-2 { background-color: #2c3e50 !important; }
+        .bg-phase-3 { background-color: #4a235a !important; }
+        .bg-phase-4 { background-color: #641e16 !important; }
+    </style>
+</head>
+<body class="flex flex-col h-screen">
+
+    <div class="relative w-full flex-grow flex items-center justify-center p-2 md:p-4 min-h-[50vh]">
+        <div class="w-full max-w-3xl aspect-[2/1] relative shadow-2xl rounded-lg overflow-hidden border border-gray-600">
+            <canvas id="gameCanvas" width="800" height="400" class="bg-phase-1"></canvas>
+            <!-- フェーズ通知テキスト -->
+            <div id="phaseAnnounce" class="absolute inset-0 flex items-center justify-center text-4xl font-bold text-white opacity-0 transition-opacity duration-500 pointer-events-none drop-shadow-[0_5px_5px_rgba(0,0,0,0.8)]">
+                PHASE 1
+            </div>
+        </div>
+    </div>
+
+    <div class="w-full h-1/3 md:h-1/4 max-h-64 p-4 pb-8 flex justify-center">
+        <div id="tapArea" class="w-full max-w-3xl h-full bg-gray-700 rounded-2xl border-b-8 border-gray-900 flex flex-col items-center justify-center cursor-pointer shadow-lg transition-transform">
+            <div class="text-3xl md:text-5xl font-bold text-gray-300 tracking-widest pointer-events-none">TAP</div>
+            <div class="text-sm md:text-base text-gray-400 mt-2 pointer-events-none">Space Key / Tap Here</div>
+        </div>
+    </div>
+
+    <div id="ui-layer">
+        <div id="startScreen" class="text-center pointer-events-auto bg-gray-800 p-6 md:p-8 rounded-xl shadow-2xl border border-gray-600 max-w-sm md:max-w-md w-full mx-4">
+            <h1 class="text-2xl md:text-3xl font-bold mb-4">リズムアクション v6</h1>
+            <p class="mb-4 text-gray-300 text-sm md:text-base">
+                <span class="text-red-400 font-bold">段階的難易度アップ実装</span><br>
+                時間経過とともにBPMが上昇し、<br>新しい障害物が追加されます。
+            </p>
+            <button id="startBtn" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 px-8 rounded-full transition-colors text-xl shadow-lg w-full">
+                ゲーム開始
+            </button>
+        </div>
+
+        <div id="resultScreen" class="text-center pointer-events-auto bg-gray-800 p-8 rounded-xl shadow-2xl border border-gray-600 hidden max-w-sm w-full mx-4">
+            <h2 class="text-3xl font-bold mb-4">RESULT</h2>
+            <div class="text-xl mb-4 text-left inline-block w-full max-w-[200px]">
+                <div class="flex justify-between mb-2"><span class="text-yellow-400 font-bold">Score:</span> <span id="resScore" class="font-bold">0</span></div>
+                <div class="flex justify-between border-t border-gray-600 pt-2"><span class="text-green-400">Just:</span> <span id="resHit">0</span></div>
+                <div class="flex justify-between"><span class="text-blue-400">Barely:</span> <span id="resBarely">0</span></div>
+                <div class="flex justify-between"><span class="text-red-400">Miss:</span> <span id="resMiss">0</span></div>
+            </div>
+            <br>
+            <button id="retryBtn" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 px-8 rounded-full transition-colors text-xl shadow-lg mt-4 w-full">
+                リトライ
+            </button>
+        </div>
+    </div>
+
+<script>
+const GAME_STATE = { INIT: 0, PLAYING: 1, END: 2 };
+const JUDGE_HIT = 0.150;
+const JUDGE_BARELY = 0.300;
+const CANVAS_W = 800;
+const CANVAS_H = 400;
+const TARGET_X = 150; 
+const SPAWN_X = 850;  
+
+let state = GAME_STATE.INIT;
+let audioCtx = null;
+let startTime = 0;
+let sequence = [];
+let events = []; // BPM変更やフェーズ表示などのメタイベント用
+let score = 0, combo = 0, maxCombo = 0;
+let stats = { hit: 0, barely: 0, miss: 0 };
+let effects = []; 
+let totalGameDuration = 0;
+let currentBPM = 120; // 描画用の現在BPM
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('startBtn');
+const retryBtn = document.getElementById('retryBtn');
+const startScreen = document.getElementById('startScreen');
+const resultScreen = document.getElementById('resultScreen');
+const tapArea = document.getElementById('tapArea');
+const phaseAnnounce = document.getElementById('phaseAnnounce');
+
+// --- 音声エンジン（特殊SE追加） ---
+function playTone(type, freq, duration, vol = 1, time = audioCtx.currentTime) {
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type; osc.frequency.setValueAtTime(freq, time);
+    gain.gain.setValueAtTime(vol, time); gain.gain.exponentialRampToValueAtTime(0.01, time + duration);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(time); osc.stop(time + duration);
+}
+
+function playNoise(duration, vol = 1, time = audioCtx.currentTime, isHit = true) {
+    if (!audioCtx) return;
+    const bufferSize = audioCtx.sampleRate * duration;
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+    const noise = audioCtx.createBufferSource(); noise.buffer = buffer;
+    const filter = audioCtx.createBiquadFilter(); filter.type = isHit ? 'highpass' : 'lowpass'; filter.frequency.value = isHit ? 1000 : 400;
+    const gain = audioCtx.createGain(); gain.gain.setValueAtTime(vol, time); gain.gain.exponentialRampToValueAtTime(0.01, time + duration);
+    noise.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+    noise.start(time);
+}
+
+const SE = {
+    metronome: (time) => playTone('sine', 880, 0.05, 0.1, time),
+    spawnPot: (time) => playTone('square', 440, 0.1, 0.3, time),
+    spawnRock: (time) => playTone('triangle', 220, 0.15, 0.5, time),
+    spawnBomb: (time) => playTone('sawtooth', 110, 0.2, 0.5, time), // 爆弾出現音（低い警戒音）
+    spawnBulb: (time) => {}, // 電球は無音（仕様書通り）
+    hit: (time) => playNoise(0.15, 0.8, time, true),
+    miss: (time) => playNoise(0.3, 0.7, time, false)
+};
+
+// --- 動的譜面ジェネレータ ---
+const OBJ_DEFS = {
+    'pot': { beats: 2, color: '#38a169', height: 40, yOffset: 0 },
+    'rock': { beats: 3, color: '#718096', height: 50, yOffset: -60 },
+    'bomb': { beats: 4, color: '#d97706', height: 30, yOffset: 0 }, // 爆弾（4拍・遅い）
+    'bulb': { beats: 2, color: '#fef08a', height: 40, yOffset: -20 }  // 電球（途中で減速トラップ）
+};
+
+// 複雑なBPM変更を管理するため、時間（秒）をベースに計算する方式に変更
+function generateSequence() {
+    sequence = [];
+    events = [];
+    let currentTime = 0;
+    
+    // フェーズ定義
+    const phases = [
+        { name: "PHASE 1", bpm: 110, count: 8, pool: ['pot'], delayChoices: [2, 4] },
+        { name: "PHASE 2", bpm: 125, count: 12, pool: ['pot', 'rock'], delayChoices: [2, 3] },
+        { name: "PHASE 3", bpm: 140, count: 16, pool: ['pot', 'rock', 'bomb', 'bulb'], delayChoices: [1.5, 2] }, // 1.5（裏拍）を解禁
+        { name: "FINAL PHASE", bpm: 155, count: 20, pool: ['pot', 'rock', 'bomb', 'bulb'], delayChoices: [1, 1.5, 2] } // 怒涛のラッシュ
+    ];
+
+    // 初期待機
+    currentTime += (60 / 110) * 4;
+
+    phases.forEach((phase, phaseIndex) => {
+        const beatInterval = 60 / phase.bpm;
+        
+        // メタイベント登録（フェーズ開始時のBGM速度変更やUI表示用）
+        events.push({ type: 'phase', name: phase.name, time: currentTime, bpm: phase.bpm, index: phaseIndex + 1 });
+        
+        // フェーズ開始時の準備時間（4拍）
+        for(let i=0; i<4; i++) {
+            events.push({ type: 'metronome', time: currentTime });
+            currentTime += beatInterval;
+        }
+
+        // オブジェクトの生成
+        for(let i=0; i < phase.count; i++) {
+            // ランダムにオブジェクト種類と出現間隔を決定
+            const objType = phase.pool[Math.floor(Math.random() * phase.pool.length)];
+            const delayBeats = phase.delayChoices[Math.floor(Math.random() * phase.delayChoices.length)];
+            const def = OBJ_DEFS[objType];
+            
+            // オブジェクト追加
+            sequence.push({
+                type: objType, def: def,
+                spawnTime: currentTime,
+                targetTime: currentTime + (def.beats * beatInterval),
+                state: 'waiting', x: SPAWN_X, y: 200 + def.yOffset,
+                bpm: phase.bpm, // 計算用に保持
+                beatInterval: beatInterval
+            });
+
+            // メトロノームは裏拍(1.5)などを考慮して、1拍ごとに鳴らす
+            let wholeBeats = Math.floor(delayBeats);
+            for(let j=0; j<wholeBeats; j++) {
+                events.push({ type: 'metronome', time: currentTime + (j * beatInterval) });
+            }
+
+            currentTime += (delayBeats * beatInterval);
+        }
+    });
+
+    // 終了処理
+    currentTime += (60 / 155) * 4;
+    sequence.push({ type: 'end', targetTime: currentTime });
+}
+
+function startGame() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    startScreen.classList.add('hidden'); resultScreen.classList.add('hidden');
+    score = 0; combo = 0; maxCombo = 0; stats = { hit: 0, barely: 0, miss: 0 }; effects = [];
+    currentBPM = 120;
+    canvas.className = "bg-phase-1";
+    
+    generateSequence();
+    startTime = audioCtx.currentTime + 1.0;
+    
+    // 実時間の適用とイベントのスケジューリング
+    sequence.forEach(obj => {
+        if (obj.type !== 'end') obj.spawnTime += startTime;
+        obj.targetTime += startTime;
+    });
+    
+    events.forEach(ev => {
+        ev.time += startTime;
+        if (ev.type === 'metronome') SE.metronome(ev.time);
+        // Phaseのアナウンス音
+        if (ev.type === 'phase') playTone('square', 660, 0.3, 0.2, ev.time);
+    });
+
+    totalGameDuration = sequence[sequence.length - 1].targetTime - startTime;
+    state = GAME_STATE.PLAYING;
+    requestAnimationFrame(gameLoop);
+}
+
+function endGame() {
+    state = GAME_STATE.END;
+    document.getElementById('resScore').textContent = score;
+    document.getElementById('resHit').textContent = stats.hit;
+    document.getElementById('resBarely').textContent = stats.barely;
+    document.getElementById('resMiss').textContent = stats.miss;
+    resultScreen.classList.remove('hidden');
+}
+
+function handleInput() {
+    const time = audioCtx.currentTime;
+    effects.push({ type: 'punch', time: time, duration: 0.1 });
+
+    let activeObjects = sequence.filter(o => o.type !== 'end' && (o.state === 'waiting' || o.state === 'active'));
+    if (activeObjects.length === 0) return;
+    activeObjects.sort((a, b) => a.targetTime - b.targetTime);
+    let target = activeObjects[0];
+
+    let diff = time - target.targetTime; 
+    let absDiff = Math.abs(diff);
+
+    if (absDiff <= JUDGE_HIT) {
+        target.state = 'hit'; score += 100 + (combo * 10); combo++; maxCombo = Math.max(maxCombo, combo); stats.hit++; SE.hit(time);
+        effects.push({ type: 'text', text: 'JUST!', color: '#4ade80', x: TARGET_X, y: 150, time: time, duration: 0.5 });
+    } else if (absDiff <= JUDGE_BARELY) {
+        target.state = 'barely'; score += 10; stats.barely++;
+        const diagText = diff < 0 ? 'FAST' : 'SLOW';
+        effects.push({ type: 'text', text: diagText, color: '#60a5fa', x: TARGET_X, y: 150, time: time, duration: 0.5 });
+    } else if (diff < -JUDGE_BARELY) {
+        effects.push({ type: 'text', text: 'TOO FAST', color: '#9ca3af', x: TARGET_X, y: 150, time: time, duration: 0.3 });
+    }
+}
+
+let lastInputTimestamp = 0;
+function triggerInput(e) {
+    if (state !== GAME_STATE.PLAYING) return;
+    const now = performance.now();
+    if (now - lastInputTimestamp < 50) return;
+    lastInputTimestamp = now;
+    handleInput();
+    if (e && e.preventDefault) e.preventDefault();
+}
+
+function gameLoop() {
+    if (state !== GAME_STATE.PLAYING) return;
+    const time = audioCtx.currentTime;
+    updateLogic(time); render(time);
+    requestAnimationFrame(gameLoop);
+}
+
+function updateLogic(time) {
+    // メタイベントの処理
+    const pendingEvents = events.filter(e => e.type === 'phase' && !e.processed && time >= e.time);
+    pendingEvents.forEach(e => {
+        e.processed = true;
+        currentBPM = e.bpm;
+        // 背景色変更
+        canvas.className = `bg-phase-${e.index}`;
+        // UIアナウンス
+        phaseAnnounce.textContent = e.name;
+        phaseAnnounce.classList.remove('opacity-0');
+        setTimeout(() => phaseAnnounce.classList.add('opacity-0'), 2000);
+    });
+
+    // オブジェクトの処理
+    sequence.forEach(obj => {
+        if (obj.type === 'end') { if (time >= obj.targetTime) endGame(); return; }
+        if (obj.state === 'waiting' && time >= obj.spawnTime) {
+            obj.state = 'active';
+            if (obj.type === 'pot') SE.spawnPot(time);
+            if (obj.type === 'rock') SE.spawnRock(time);
+            if (obj.type === 'bomb') SE.spawnBomb(time);
+            if (obj.type === 'bulb') SE.spawnBulb(time);
+        }
+        if (obj.state === 'active' && time > obj.targetTime + JUDGE_BARELY) {
+            obj.state = 'miss'; combo = 0; stats.miss++; SE.miss(time);
+            effects.push({ type: 'text', text: 'MISS', color: '#f87171', x: TARGET_X - 50, y: 200, time: time, duration: 0.5 });
+            effects.push({ type: 'shake', time: time, duration: 0.2 });
+        }
+    });
+}
+
+function render(time) {
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    let shakeX = 0, shakeY = 0;
+    const activeShake = effects.find(e => e.type === 'shake' && time < e.time + e.duration);
+    if (activeShake) { shakeX = (Math.random() - 0.5) * 10; shakeY = (Math.random() - 0.5) * 10; }
+
+    ctx.save(); ctx.translate(shakeX, shakeY);
+
+    const currentInterval = 60 / currentBPM;
+
+    // レーン描画
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.2)'; ctx.fillRect(0, 190, CANVAS_W, 60);
+    const refSpeed = (SPAWN_X - TARGET_X) / (2 * currentInterval);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)'; ctx.lineWidth = 2;
+    for(let i=1; i<=4; i++) {
+        const lineX = TARGET_X + (refSpeed * currentInterval * i);
+        if(lineX < CANVAS_W) { ctx.beginPath(); ctx.moveTo(lineX, 190); ctx.lineTo(lineX, 250); ctx.stroke(); }
+    }
+
+    ctx.beginPath(); ctx.moveTo(0, 250); ctx.lineTo(CANVAS_W, 250);
+    ctx.strokeStyle = '#4a5568'; ctx.lineWidth = 4; ctx.stroke();
+
+    // 拍動（現在のBPMに同期）
+    let beatProgress = 0;
+    if (time >= startTime) beatProgress = ((time - startTime) % currentInterval) / currentInterval;
+    const ringRadius = 25 + (1.0 - beatProgress) * 10;
+    
+    ctx.beginPath(); ctx.arc(TARGET_X, 225, ringRadius, 0, Math.PI * 2);
+    const alpha = 0.3 + (1.0 - beatProgress) * 0.5;
+    ctx.strokeStyle = `rgba(250, 204, 21, ${alpha})`; ctx.lineWidth = 3; ctx.stroke();
+    ctx.beginPath(); ctx.arc(TARGET_X, 225, 25, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'; ctx.lineWidth = 2; ctx.stroke();
+
+    const isPunching = effects.find(e => e.type === 'punch' && time < e.time + e.duration);
+    ctx.fillStyle = '#cbd5e0'; ctx.fillRect(TARGET_X - 60, 180, 40, 70); 
+    if (isPunching) { ctx.fillStyle = '#fc8181'; ctx.fillRect(TARGET_X - 20, 200, 40, 15); } 
+    else { ctx.fillStyle = '#a0aec0'; ctx.fillRect(TARGET_X - 40, 200, 20, 15); }
+
+    sequence.forEach(obj => {
+        if (obj.state === 'hit' || obj.type === 'end') return;
+        const timeToTarget = obj.targetTime - time;
+        const totalDuration = obj.targetTime - obj.spawnTime;
+        const speed = (SPAWN_X - TARGET_X) / totalDuration;
+        
+        let x = TARGET_X + (timeToTarget * speed);
+        let y = obj.y;
+
+        // 特殊な軌道の計算
+        const progress = 1.0 - (timeToTarget / totalDuration);
+        
+        if (obj.type === 'rock') {
+            y = obj.y + Math.abs(Math.sin(progress * Math.PI * 2)) * 60; 
+        } else if (obj.type === 'bulb') {
+            // トラップ: 電球は到達直前（progress 0.7あたり）で一瞬減速（イージングの細工）し、プレイヤーの空振りを誘う
+            let easingProgress = progress;
+            if (progress > 0.6 && progress < 0.9) {
+                // 時間の進行を歪める
+                easingProgress = 0.6 + (progress - 0.6) * 0.5;
+            } else if (progress >= 0.9) {
+                // 遅れを取り戻すために急加速
+                easingProgress = 0.75 + (progress - 0.9) * 2.5; 
+            }
+            x = SPAWN_X - ((SPAWN_X - TARGET_X) * easingProgress);
+        }
+
+        ctx.fillStyle = obj.def.color;
+        if (obj.state === 'barely') { ctx.fillStyle = '#cbd5e0'; y += 20; } 
+        else if (obj.state === 'miss') { ctx.fillStyle = '#fc8181'; x = TARGET_X - 20; }
+
+        if (x > -50 && x < CANVAS_W + 50) {
+            ctx.beginPath();
+            if (obj.type === 'pot' || obj.type === 'bomb') { 
+                ctx.fillRect(x - 15, y, 30, obj.def.height); 
+                // 爆弾の場合は導火線を表現
+                if(obj.type === 'bomb') {
+                    ctx.fillStyle = 'red'; ctx.fillRect(x - 5, y - 10, 10, 10);
+                }
+            } 
+            else if (obj.type === 'rock') { ctx.arc(x, y + 25, 20, 0, Math.PI * 2); ctx.fill(); }
+            else if (obj.type === 'bulb') {
+                ctx.arc(x, y + 20, 15, 0, Math.PI * 2); ctx.fill();
+                ctx.fillRect(x - 8, y + 30, 16, 10);
+            }
+
+            if (obj.state === 'waiting' || obj.state === 'active') {
+                const remainingBeats = Math.ceil(timeToTarget / obj.beatInterval);
+                if (remainingBeats > 0 && remainingBeats <= obj.def.beats) {
+                    ctx.fillStyle = 'white'; ctx.font = 'bold 16px monospace'; ctx.textAlign = 'center'; ctx.fillText(remainingBeats, x, y - 10);
+                }
+            }
+        }
+    });
+
+    effects.forEach(e => {
+        if (e.type === 'text' && time < e.time + e.duration) {
+            const progress = (time - e.time) / e.duration;
+            ctx.fillStyle = e.color; ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'center';
+            ctx.globalAlpha = 1.0 - progress; ctx.fillText(e.text, e.x, e.y - (progress * 20)); ctx.globalAlpha = 1.0;
+        }
+    });
+
+    // コンボ表示
+    if (combo > 2) {
+        ctx.fillStyle = '#f6e05e'; ctx.font = 'italic bold 32px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText(`${combo} COMBO!`, 20, 50);
+    }
+
+    ctx.restore();
+
+    let currentProgress = 0;
+    if (time > startTime && totalGameDuration > 0) currentProgress = Math.min(1, Math.max(0, (time - startTime) / totalGameDuration));
+    const barWidth = CANVAS_W - 100, barX = 50, barY = 15;
+    ctx.fillStyle = '#4a5568'; ctx.fillRect(barX, barY, barWidth, 6);
+    ctx.fillStyle = '#4ade80'; ctx.fillRect(barX, barY, barWidth * currentProgress, 6);
+}
+
+startBtn.addEventListener('click', startGame);
+retryBtn.addEventListener('click', startGame);
+window.addEventListener('keydown', (e) => { if (e.code === 'Space') triggerInput(e); });
+tapArea.addEventListener('touchstart', triggerInput, { passive: false });
+tapArea.addEventListener('mousedown', triggerInput);
+canvas.addEventListener('touchstart', triggerInput, { passive: false });
+canvas.addEventListener('mousedown', triggerInput);
+
+</script>
+</body>
+</html>
