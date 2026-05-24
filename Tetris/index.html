@@ -7,7 +7,6 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body {
-            /* モバイル特有のジェスチャー（ピンチズーム、スワイプ戻る等）を完全に無効化 */
             touch-action: none;
             user-select: none;
             -webkit-user-select: none;
@@ -15,7 +14,6 @@
         canvas {
             image-rendering: pixelated;
         }
-        /* ボタン基本クラス：高さ100%、押下時の縮小エフェクトによるフィードバック */
         .btn-control {
             @apply text-white rounded-lg flex items-center justify-center transition-transform transform active:scale-95 select-none;
             touch-action: manipulation;
@@ -24,15 +22,19 @@
 </head>
 <body class="bg-gray-900 text-white font-sans h-screen w-screen overflow-hidden flex flex-col">
 
-    <!-- ヘッダー (固定長) -->
-    <header class="text-center py-2 bg-gray-800 shadow-md z-10 flex-shrink-0">
+    <!-- ヘッダー -->
+    <header class="text-center py-2 bg-gray-800 shadow-md z-10 flex-shrink-0 relative flex items-center justify-center">
         <h1 class="text-2xl font-bold tracking-widest text-blue-400">TETRIS</h1>
+        <!-- BGMトグルボタン -->
+        <button id="btn-bgm" class="absolute right-2 md:right-4 text-xs md:text-sm font-bold text-gray-300 border border-gray-600 rounded px-2 py-1 bg-gray-700 active:bg-gray-600 transition-colors">
+            🔊 BGM ON
+        </button>
     </header>
 
-    <!-- メインゲームエリア：min-h-0を指定し、高さが溢れないようにする -->
+    <!-- メインゲームエリア -->
     <main class="flex-1 min-h-0 flex flex-col md:flex-row items-center justify-start md:justify-center gap-2 p-2 w-full max-w-4xl mx-auto overflow-hidden">
         
-        <!-- ステータスパネル (フレックス幅・高さを最小化) -->
+        <!-- ステータスパネル -->
         <div class="flex flex-row md:flex-col gap-2 w-full max-w-md md:w-32 justify-between order-1 flex-shrink-0">
             
             <div class="bg-gray-800 p-1 md:p-2 rounded border border-gray-700 flex flex-col items-center justify-center">
@@ -66,7 +68,7 @@
             
         </div>
 
-        <!-- メインフィールド：親要素の枠内で最大化 -->
+        <!-- メインフィールド -->
         <div class="relative bg-black border-2 border-gray-600 rounded shadow-lg order-2 flex-1 min-h-0 w-full max-w-sm flex items-center justify-center overflow-hidden">
             <canvas id="game-canvas" width="300" height="600" class="block h-full w-auto object-contain"></canvas>
             
@@ -80,31 +82,147 @@
 
     </main>
 
-    <!-- モバイル用コントロールパネル (大幅拡大＆両手持ち最適化レイアウト) -->
-    <div class="md:hidden bg-gray-800 p-2 pb-6 flex flex-col gap-2 z-10 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.3)] flex-shrink-0 h-48 sm:h-56">
+    <!-- タッチデバイス用コントロールパネル -->
+    <!-- ※CSSのメディアクエリによる非表示を廃止し、JSでハードウェア判定して制御する -->
+    <div id="mobile-controls" class="bg-gray-800 p-2 pb-6 flex flex-col gap-2 z-10 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.3)] flex-shrink-0 h-48 sm:h-56">
         
         <!-- 上段：アクション系 (右手用) -->
         <div class="flex gap-2 h-1/2">
-            <!-- HOLD (小) -->
             <button id="btn-hold" class="btn-control flex-1 bg-gray-700 active:bg-gray-600 border-b-4 border-gray-900 text-sm font-bold">HOLD</button>
-            <!-- 回転 (大：使用頻度高) -->
             <button id="btn-rotate" class="btn-control flex-[2] bg-blue-600 active:bg-blue-500 border-b-4 border-blue-900 text-2xl font-black shadow-lg">↻ 回転</button>
-            <!-- ハードドロップ (中) -->
             <button id="btn-drop" class="btn-control flex-1 bg-red-600 active:bg-red-500 border-b-4 border-red-900 text-sm font-bold shadow-lg">⏬ DROP</button>
         </div>
         
         <!-- 下段：移動系 (左手用中心) -->
         <div class="flex gap-2 h-1/2">
-            <!-- 左移動 (大) -->
             <button id="btn-left" class="btn-control flex-[2] bg-gray-700 active:bg-gray-500 border-b-4 border-gray-900 text-3xl font-black shadow-lg">◀</button>
-            <!-- ソフトドロップ (小) -->
             <button id="btn-soft" class="btn-control flex-1 bg-gray-600 active:bg-gray-500 border-b-4 border-gray-800 text-xl font-black">▼</button>
-            <!-- 右移動 (大) -->
             <button id="btn-right" class="btn-control flex-[2] bg-gray-700 active:bg-gray-500 border-b-4 border-gray-900 text-3xl font-black shadow-lg">▶</button>
         </div>
     </div>
 
     <script>
+        // ---------------------------------------------------
+        // 1. タッチデバイス判定の論理実装
+        // ---------------------------------------------------
+        const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (navigator.msMaxTouchPoints > 0);
+        if (!isTouchDevice) {
+            // 物理キーボード環境（非タッチ端末）でのみコントロールを隠す
+            document.getElementById('mobile-controls').classList.add('hidden');
+        }
+
+        // ---------------------------------------------------
+        // 2. 音声生成エンジン (Web Audio API)
+        // ---------------------------------------------------
+        class BGMPlayer {
+            constructor() {
+                this.audioCtx = null;
+                this.isPlaying = false;
+                this.enabled = true; // ユーザー設定
+                this.scheduleTimer = null;
+                this.bpm = 145;
+                this.noteIndex = 0;
+                this.nextNoteTime = 0;
+
+                // コロブチカの配列定義: [MIDIノート番号, 音符の長さ(4=四分, 8=八分)]
+                // 0は休符
+                this.melody = [
+                    76,4, 71,8, 72,8, 74,4, 72,8, 71,8, // ミ シ ド レ ド シ
+                    69,4, 69,8, 72,8, 76,4, 74,8, 72,8, // ラ ラ ド ミ レ ド
+                    71,4, 71,8, 72,8, 74,4, 76,4,       // シ シ ド レ ミ
+                    72,4, 69,4, 69,4, 0,4,              // ド ラ ラ (休符)
+                    74,4, 74,8, 77,8, 81,4, 79,8, 77,8, // レ レ ファ ラ ソ ファ
+                    76,4, 76,8, 72,8, 76,4, 74,8, 72,8, // ミ ミ ド ミ レ ド
+                    71,4, 71,8, 72,8, 74,4, 76,4,       // シ シ ド レ ミ
+                    72,4, 69,4, 69,4, 0,4               // ド ラ ラ (休符)
+                ];
+            }
+
+            init() {
+                if (!this.audioCtx) {
+                    this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+            }
+
+            toggle() {
+                this.enabled = !this.enabled;
+                if (!this.enabled) {
+                    clearTimeout(this.scheduleTimer);
+                } else if (this.isPlaying) {
+                    this.nextNoteTime = this.audioCtx.currentTime + 0.1;
+                    this.schedule();
+                }
+                return this.enabled;
+            }
+
+            start() {
+                this.init();
+                if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
+                this.isPlaying = true;
+                this.noteIndex = 0;
+                if (this.enabled) {
+                    this.nextNoteTime = this.audioCtx.currentTime + 0.1;
+                    this.schedule();
+                }
+            }
+
+            stop() {
+                this.isPlaying = false;
+                clearTimeout(this.scheduleTimer);
+            }
+
+            playNote(freq, duration) {
+                if (!this.audioCtx || freq === 0) return;
+                
+                const osc = this.audioCtx.createOscillator();
+                const gain = this.audioCtx.createGain();
+                
+                osc.type = 'square'; // レトロなチップチューン音源
+                osc.frequency.value = freq;
+                
+                osc.connect(gain);
+                gain.connect(this.audioCtx.destination);
+                
+                const now = this.audioCtx.currentTime;
+                osc.start(now);
+                
+                // ポップノイズを防ぎつつ、スタッカート気味に減衰させるエンベロープ
+                gain.gain.setValueAtTime(0.04, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + duration - 0.05);
+                
+                osc.stop(now + duration);
+            }
+
+            schedule() {
+                if (!this.isPlaying || !this.enabled) return;
+                
+                // 次の音が処理時間に近づいたら先読みしてスケジュール
+                while (this.nextNoteTime < this.audioCtx.currentTime + 0.1) {
+                    const note = this.melody[this.noteIndex * 2];
+                    const type = this.melody[this.noteIndex * 2 + 1];
+                    
+                    const beats = type === 4 ? 1 : 0.5;
+                    const duration = (60 / this.bpm) * beats;
+                    
+                    if (note > 0) {
+                        // MIDIノート番号から周波数(Hz)への数式変換
+                        const freq = 440 * Math.pow(2, (note - 69) / 12);
+                        this.playNote(freq, duration);
+                    }
+                    
+                    this.nextNoteTime += duration;
+                    this.noteIndex++;
+                    if (this.noteIndex >= this.melody.length / 2) {
+                        this.noteIndex = 0; // 曲のループ
+                    }
+                }
+                this.scheduleTimer = setTimeout(() => this.schedule(), 25);
+            }
+        }
+
+        // ---------------------------------------------------
+        // 3. テトリス本体のロジック
+        // ---------------------------------------------------
         const COLS = 10;
         const ROWS = 20;
         const BLOCK_SIZE = 30;
@@ -178,14 +296,14 @@
                 this.levelDisplay = document.getElementById('level-display');
                 this.linesDisplay = document.getElementById('lines-display');
                 
-                this.gameState = 'PLAYING';
+                this.bgmPlayer = new BGMPlayer();
                 
+                this.gameState = 'PLAYING';
                 this.board = this.createEmptyBoard();
                 this.score = 0;
                 this.level = 1;
                 this.lines = 0;
                 this.elapsedTime = 0; 
-                
                 this.gameOver = false;
                 this.isPaused = false;
                 
@@ -197,12 +315,10 @@
                 this.dropInterval = 1000;
                 this.dropCounter = 0;
                 this.lastTime = 0;
-                
                 this.lockDelay = 500;
                 this.lockCounter = 0;
                 this.isLocking = false;
                 this.lockMoves = 0;
-                
                 this.currentPiece = null;
                 this.animationId = null;
 
@@ -246,6 +362,9 @@
                 this.fillQueue();
                 this.spawnPiece();
 
+                // BGM再生開始 (ユーザーインタラクション起因で実行されるため安全)
+                this.bgmPlayer.start();
+
                 document.addEventListener('keydown', this.handleKeyDown);
 
                 this.lastTime = performance.now();
@@ -256,6 +375,8 @@
             stop() {
                 this.gameOver = true;
                 this.gameState = 'GAMEOVER';
+                this.bgmPlayer.stop(); // ゲームオーバーで音楽停止
+                
                 document.removeEventListener('keydown', this.handleKeyDown);
                 if (this.animationId) cancelAnimationFrame(this.animationId);
                 
@@ -799,8 +920,23 @@
                     this.start();
                 });
 
+                // BGMトグルボタンの制御
+                const bgmBtn = document.getElementById('btn-bgm');
+                bgmBtn.addEventListener('click', () => {
+                    const isEnabled = this.bgmPlayer.toggle();
+                    bgmBtn.innerText = isEnabled ? '🔊 BGM ON' : '🔇 BGM OFF';
+                    if (isEnabled) {
+                        bgmBtn.classList.remove('text-gray-500');
+                        bgmBtn.classList.add('text-gray-300');
+                    } else {
+                        bgmBtn.classList.remove('text-gray-300');
+                        bgmBtn.classList.add('text-gray-500');
+                    }
+                });
+
                 const bindBtn = (id, action) => {
                     const btn = document.getElementById(id);
+                    if (!btn) return;
                     const handler = (e) => { 
                         e.preventDefault(); 
                         if (this.gameState === 'PLAYING') action(); 
