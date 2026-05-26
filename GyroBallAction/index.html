@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Gyro Ball Action</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #222; font-family: sans-serif; touch-action: none; overscroll-behavior: none; }
+        canvas { display: block; touch-action: none; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        .pointer-events-auto { pointer-events: auto; }
+        
+        /* スキン選択ボタンのスタイル */
+        .skin-btn { width: 40px; height: 40px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: transform 0.1s; pointer-events: auto;}
+        .skin-btn:active { transform: scale(0.9); }
+        .skin-normal { background-color: #ff4444; }
+        .skin-metal { background: radial-gradient(circle at 30% 30%, #e0e0e0, #888); }
+        .skin-neon { background-color: #00ff00; box-shadow: 0 0 10px #00ff00, inset 0 0 10px #00ff00; border-color: #ccffcc; }
+        .skin-wood { background-color: #8b5a2b; border-color: #5c3a18; }
+    </style>
+</head>
+<body>
+
+    <!-- Three.js描画領域 -->
+    <div id="canvas-container"></div>
+
+    <!-- UIレイヤー -->
+    <div id="ui-layer" class="flex flex-col justify-between">
+        
+        <!-- ヘッダー (プレイ中のみ表示) -->
+        <div id="header-ui" class="hidden p-4 flex justify-between items-start">
+            <div class="bg-black bg-opacity-50 text-white px-4 py-2 rounded-lg font-bold pointer-events-auto">
+                TIME: <span id="time-display">0.0</span>s
+            </div>
+            <!-- スキン変更パレット -->
+            <div class="flex flex-col gap-2 bg-black bg-opacity-30 p-2 rounded-full pointer-events-auto">
+                <button class="skin-btn skin-normal" onclick="changeSkin('normal')" title="ノーマル"></button>
+                <button class="skin-btn skin-metal" onclick="changeSkin('metal')" title="メタリック"></button>
+                <button class="skin-btn skin-neon" onclick="changeSkin('neon')" title="ネオン"></button>
+                <button class="skin-btn skin-wood" onclick="changeSkin('wood')" title="ウッド"></button>
+            </div>
+        </div>
+
+        <!-- 状態オーバーレイ (タイトル / 結果) -->
+        <div id="overlay-ui" class="absolute inset-0 bg-black bg-opacity-70 flex flex-col items-center justify-center pointer-events-auto backdrop-blur-sm">
+            <h1 id="title-text" class="text-4xl md:text-5xl font-extrabold text-white mb-2 tracking-wider text-center">GYRO BALL</h1>
+            <p id="sub-text" class="text-gray-300 mb-8 text-center px-4 leading-relaxed">
+                スマホを傾けるか、<span class="text-green-400 font-bold">画面をスワイプ</span>して<br>
+                落ちないように緑のゴールを目指せ！<br>
+                <span class="text-xs text-yellow-400 block mt-2">※ブラウザ仕様によりジャイロが動かない環境に対応</span>
+            </p>
+            
+            <button id="start-btn" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 px-10 rounded-full text-xl shadow-[0_0_15px_rgba(37,99,235,0.7)] transition-all active:scale-95">
+                TAP TO START
+            </button>
+        </div>
+
+        <!-- 操作フィードバック用インジケーター (プレイ中のみ) -->
+        <div id="drag-indicator" class="hidden absolute bottom-10 left-1/2 transform -translate-x-1/2 text-white text-sm bg-black bg-opacity-50 px-4 py-2 rounded-full pointer-events-none">
+            画面をドラッグ（スワイプ）して操作
+        </div>
+    </div>
+
+    <script>
+        // --- 1. Three.js 基本セットアップ ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.Fog(0x222222, 20, 100);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        container.appendChild(renderer.domElement);
+
+        // ライティング
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(10, 20, 10);
+        dirLight.castShadow = true;
+        dirLight.shadow.camera.left = -30;
+        dirLight.shadow.camera.right = 30;
+        dirLight.shadow.camera.top = 30;
+        dirLight.shadow.camera.bottom = -30;
+        scene.add(dirLight);
+
+        // --- 2. スキン（マテリアル）定義 ---
+        const materials = {
+            normal: new THREE.MeshStandardMaterial({ color: 0xff4444, roughness: 0.4, metalness: 0.1 }),
+            metal: new THREE.MeshStandardMaterial({ color: 0xaaaaaa, roughness: 0.2, metalness: 0.9 }),
+            neon: new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 0.6, roughness: 0.2 }),
+            wood: new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9, metalness: 0.0 })
+        };
+
+        // --- 3. ゲームオブジェクトの生成 ---
+        const ballRadius = 0.5;
+        const ballGeometry = new THREE.SphereGeometry(ballRadius, 32, 32);
+        const ball = new THREE.Mesh(ballGeometry, materials.normal);
+        ball.castShadow = true;
+        scene.add(ball);
+
+        // ステージ定義
+        const stageData = [
+            { x: 0, z: 0, w: 6, d: 6 }, // スタート地点
+            { x: 0, z: -8, w: 2, d: 12 }, // 細い道
+            { x: 5, z: -13, w: 12, d: 2 }, // 右へ曲がる
+            { x: 10, z: -20, w: 2, d: 16 }, // 細い道
+            { x: 5, z: -27, w: 12, d: 4 }, // 左へ広がる
+            { x: 0, z: -35, w: 3, d: 14 }, // さらに細い道
+            { x: 0, z: -45, w: 8, d: 8, isGoal: true } // ゴール
+        ];
+
+        const stageMeshes = [];
+        const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.8 });
+        const goalMaterial = new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.8, emissive: 0x116633 });
+
+        stageData.forEach(data => {
+            const geo = new THREE.BoxGeometry(data.w, 1, data.d);
+            const mat = data.isGoal ? goalMaterial : floorMaterial;
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(data.x, -0.5, data.z);
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            stageMeshes.push({ mesh, data });
+        });
+
+        // --- 4. ゲームロジックと状態管理 ---
+        let gameState = 'title';
+        let startTime = 0;
+        let elapsedTime = 0;
+        
+        let ballVel = { x: 0, y: 0, z: 0 };
+        const maxSpeed = 0.3;
+        const friction = 0.95;
+        const gravity = 0.02;
+        const accelerationRate = 0.005;
+
+        // 入力値 (ジャイロ、キーボード、またはタッチ)
+        let inputX = 0;
+        let inputZ = 0;
+        
+        // ジャイロ用
+        let baseBeta = 0;
+        let baseGamma = 0;
+        let isCalibrated = false;
+
+        // タッチ/ドラッグ操作用
+        let isDragging = false;
+        let startTouchX = 0;
+        let startTouchY = 0;
+        const touchSensitivity = 0.015; // ドラッグ量から推力への変換係数
+
+        // キーボード入力（PC用）
+        const keys = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
+        window.addEventListener('keydown', e => keys[e.code] = true);
+        window.addEventListener('keyup', e => keys[e.code] = false);
+
+        // --- 5. UI要素の取得 ---
+        const overlayUi = document.getElementById('overlay-ui');
+        const headerUi = document.getElementById('header-ui');
+        const titleText = document.getElementById('title-text');
+        const subText = document.getElementById('sub-text');
+        const startBtn = document.getElementById('start-btn');
+        const timeDisplay = document.getElementById('time-display');
+        const dragIndicator = document.getElementById('drag-indicator');
+
+        window.changeSkin = function(skinName) {
+            if (materials[skinName]) ball.material = materials[skinName];
+        };
+
+        // --- 6. イベントリスナー ---
+        startBtn.addEventListener('click', async () => {
+            // ジャイロのパーミッション要求 (iOS向け)
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    const permission = await DeviceOrientationEvent.requestPermission();
+                    if (permission === 'granted') {
+                        window.addEventListener('deviceorientation', handleOrientation);
+                    }
+                } catch (error) {
+                    console.warn("DeviceOrientation API blocked.", error);
+                }
+            } else {
+                window.addEventListener('deviceorientation', handleOrientation);
+            }
+            startGame();
+        });
+
+        // ジャイロ処理
+        function handleOrientation(event) {
+            if (gameState !== 'playing' || isDragging) return; // ドラッグ中はジャイロ入力を無視
+
+            if (!isCalibrated) {
+                baseBeta = event.beta || 0;
+                baseGamma = event.gamma || 0;
+                isCalibrated = true;
+                return;
+            }
+
+            let diffBeta = (event.beta || 0) - baseBeta;
+            let diffGamma = (event.gamma || 0) - baseGamma;
+            diffBeta = Math.max(-90, Math.min(90, diffBeta));
+            diffGamma = Math.max(-90, Math.min(90, diffGamma));
+
+            inputZ = (diffBeta / 90); 
+            inputX = (diffGamma / 90);
+        }
+
+        // --- タッチ・ドラッグ処理 (ハイブリッド操作) ---
+        function handleDragStart(x, y) {
+            if (gameState !== 'playing') return;
+            isDragging = true;
+            startTouchX = x;
+            startTouchY = y;
+            dragIndicator.classList.add('hidden'); // ドラッグし始めたら案内を消す
+        }
+
+        function handleDragMove(x, y) {
+            if (!isDragging || gameState !== 'playing') return;
+            const dx = x - startTouchX;
+            const dy = y - startTouchY;
+            
+            // ピクセル差分を入力値(-1.0 ~ 1.0)に変換
+            inputX = Math.max(-1, Math.min(1, dx * touchSensitivity));
+            inputZ = Math.max(-1, Math.min(1, dy * touchSensitivity));
+        }
+
+        function handleDragEnd() {
+            isDragging = false;
+            inputX = 0;
+            inputZ = 0;
+            isCalibrated = false; // ジャイロ操作に戻ったときに再キャリブレーションする
+        }
+
+        // スマホ向けタッチイベント (キャンバス領域全体)
+        container.addEventListener('touchstart', (e) => { e.preventDefault(); handleDragStart(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        container.addEventListener('touchmove', (e) => { e.preventDefault(); handleDragMove(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        container.addEventListener('touchend', handleDragEnd);
+
+        // PC向けマウスイベント
+        container.addEventListener('mousedown', (e) => handleDragStart(e.clientX, e.clientY));
+        window.addEventListener('mousemove', (e) => handleDragMove(e.clientX, e.clientY));
+        window.addEventListener('mouseup', handleDragEnd);
+
+        // --- 7. ゲームサイクル ---
+        function startGame() {
+            gameState = 'playing';
+            ball.position.set(0, ballRadius, 0);
+            ballVel = { x: 0, y: 0, z: 0 };
+            isCalibrated = false;
+            inputX = 0;
+            inputZ = 0;
+
+            overlayUi.classList.add('hidden');
+            headerUi.classList.remove('hidden');
+            dragIndicator.classList.remove('hidden'); // 遊び方に迷わないよう案内を表示
+            
+            startTime = Date.now();
+        }
+
+        function gameOver() {
+            gameState = 'gameover';
+            overlayUi.classList.remove('hidden');
+            headerUi.classList.add('hidden');
+            dragIndicator.classList.add('hidden');
+            titleText.innerText = "GAME OVER";
+            titleText.classList.replace('text-white', 'text-red-500');
+            subText.innerText = "コースから落下してしまった...";
+            startBtn.innerText = "RETRY";
+        }
+
+        function gameClear() {
+            gameState = 'clear';
+            overlayUi.classList.remove('hidden');
+            headerUi.classList.add('hidden');
+            dragIndicator.classList.add('hidden');
+            titleText.innerText = "CLEAR!";
+            titleText.classList.replace('text-white', 'text-yellow-400');
+            titleText.classList.replace('text-red-500', 'text-yellow-400');
+            subText.innerText = `TIME: ${elapsedTime}s\n素晴らしいコントロールです！`;
+            startBtn.innerText = "PLAY AGAIN";
+        }
+
+        // --- 8. メインループ ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameState === 'playing') {
+                elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
+                timeDisplay.innerText = elapsedTime;
+
+                // キーボード入力による上書き
+                let kx = 0, kz = 0;
+                if (keys.ArrowUp) kz -= 1;
+                if (keys.ArrowDown) kz += 1;
+                if (keys.ArrowLeft) kx -= 1;
+                if (keys.ArrowRight) kx += 1;
+                
+                let finalInputX = kx !== 0 ? kx : inputX;
+                let finalInputZ = kz !== 0 ? kz : inputZ;
+
+                ballVel.x += finalInputX * accelerationRate;
+                ballVel.z += finalInputZ * accelerationRate;
+
+                ballVel.x *= friction;
+                ballVel.z *= friction;
+
+                ballVel.x = Math.max(-maxSpeed, Math.min(maxSpeed, ballVel.x));
+                ballVel.z = Math.max(-maxSpeed, Math.min(maxSpeed, ballVel.z));
+
+                ball.position.x += ballVel.x;
+                ball.position.z += ballVel.z;
+
+                // 衝突（落下）判定
+                let onGround = false;
+                let currentFloor = null;
+                const margin = ballRadius * 0.5; 
+
+                for (let i = 0; i < stageData.length; i++) {
+                    const rect = stageData[i];
+                    const minX = rect.x - rect.w / 2 - margin;
+                    const maxX = rect.x + rect.w / 2 + margin;
+                    const minZ = rect.z - rect.d / 2 - margin;
+                    const maxZ = rect.z + rect.d / 2 + margin;
+
+                    if (ball.position.x > minX && ball.position.x < maxX &&
+                        ball.position.z > minZ && ball.position.z < maxZ) {
+                        onGround = true;
+                        currentFloor = rect;
+                        break;
+                    }
+                }
+
+                if (onGround) {
+                    ball.position.y = ballRadius;
+                    ballVel.y = 0;
+                    if (currentFloor && currentFloor.isGoal) gameClear();
+                } else {
+                    ballVel.y -= gravity;
+                    ball.position.y += ballVel.y;
+                }
+
+                if (ball.position.y < -10) gameOver();
+            } else if (gameState === 'gameover') {
+                ballVel.y -= gravity;
+                ball.position.y += ballVel.y;
+            }
+
+            // カメラ追従
+            const targetCamPos = new THREE.Vector3(
+                ball.position.x, 
+                Math.max(ball.position.y + 10, 5),
+                ball.position.z + 12
+            );
+            camera.position.lerp(targetCamPos, 0.1);
+            camera.lookAt(ball.position.x, ball.position.y, ball.position.z);
+
+            // ボールの回転
+            if (gameState === 'playing' || gameState === 'clear') {
+                ball.rotation.x += ballVel.z * 0.5;
+                ball.rotation.z -= ballVel.x * 0.5;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
